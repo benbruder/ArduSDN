@@ -13,9 +13,9 @@
 #endif
 
 void setup() {
-  // roleSetup();
+  roleSetup();
 }
 
 void loop() {
-  // roleLoop();
+  roleLoop();
 }
