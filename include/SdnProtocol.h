@@ -3,21 +3,35 @@
 
 #include <Arduino.h>
 
-// Data-plane packet exchanged by Uno hosts through Nano switches.
-struct Packet {
+// Application/data-plane packet exchanged by hosts and forwarded by switches.
+struct __attribute__((packed)) DataPacket {
   uint8_t source_id;
   uint8_t dest_id;
-  uint16_t data;
+  uint8_t app_id;
+  uint8_t setting;
+  uint32_t data;
 };
 
 // Control-plane packet exchanged between switches, relay, and controller.
-struct ArduFlowPacket {
-  uint8_t type;
+struct __attribute__((packed)) ArduFlowPacket {
   uint8_t source_id;
   uint8_t dest_id;
+  uint8_t type;
   uint8_t port;
-  Packet packet;
+  DataPacket packet;
 };
+
+static_assert(sizeof(DataPacket) == 8, "DataPacket must stay 8 bytes");
+static_assert(sizeof(ArduFlowPacket) == 12, "ArduFlowPacket must stay 12 bytes");
+
+const uint8_t DATA_PACKET_SIZE = sizeof(DataPacket);
+const uint8_t ARDUFLOW_PACKET_SIZE = sizeof(ArduFlowPacket);
+
+// DataPacket app/setting values used for discovery pings.
+const uint8_t DATA_APP_PING_REQUEST = 0;
+const uint8_t DATA_APP_PING_REPLY = 1;
+const uint8_t DATA_SETTING_NONE = 0;
+const uint8_t DATA_SETTING_TIMEOUT_US = 1;
 
 // ArduFlow control message types.
 const uint8_t AF_ACK = 0;
@@ -35,8 +49,11 @@ const uint8_t AF_FLOW_DELETE_ALL = 29;
 const uint8_t AF_PORT_STATUS_QUERY = 30;
 const uint8_t AF_PORT_STATUS_ONLINE = 31;
 const uint8_t AF_PORT_STATUS_OFFLINE = 32;
+const uint8_t AF_BLOCK_PORT = 40;
+const uint8_t AF_UNBLOCK_PORT = 41;
 
 const uint8_t AF_CONTROLLER_ID = 0;
 const uint8_t AF_NO_PORT = 0;
+const uint8_t AF_UNKNOWN_ID = 255;
 
 #endif
