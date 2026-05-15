@@ -8,7 +8,7 @@ The design is not full OpenFlow or enterprise SDN. It is a lightweight education
 - Control-plane logic is centralized.
 - Data-plane forwarding is handled by Nano-based switches.
 - Hosts are simple Uno boards.
-- Messages are simple line-based serial packets.
+- Messages are simple fixed-size packed binary packets sent over serial.
 
 ## Hardware Architecture
 
@@ -64,14 +64,18 @@ File: src/controller.h
 
 Responsibilities:
 - Own the global SDN control logic.
-- Receive PACKET_IN messages from switches.
-- Install FLOW_ADD rules.
+- Receive ROUTE_REQ messages from switches.
+- Install FLOW_MOD rules.
 - Send messages to N1/N4 through Mega 1 over Serial1.
 - Send messages to N2 over Serial2.
 - Send messages to N3 over Serial3.
 - Print useful debugging info to Serial0.
-- Ping 
 - Implement or simulate STP
+Other:
+- Controller performs startup port discovery, computes a logical spanning tree, and periodically health-checks ports.
+- Controller may send FLOW_DELETE_ALL after topology/STP changes to clear stale switch rules.
+- Controller roots STP at STP_ROOT_SWITCH_ID.
+
 
 ### Mega 1: Relay
 
@@ -92,8 +96,8 @@ File: src/nanoswitch.h
 Responsibilities:
 - Maintain a tiny flow table.
 - Forward packets based on installed flow rules.
-- Send PACKET_IN to Mega 2 when destination is unknown.
-- Accept FLOW_ADD, FLOW_CLEAR, and STATUS messages.
+- Send ROUTE_REQ to Mega 2 when destination is unknown.
+- Accept FLOW_MOD, PORT_STATUS, and BLOCK_PORT/UNBLOCK_PORT messages.
 - Avoid Arduino String.
 - Use fixed-size buffers.
 

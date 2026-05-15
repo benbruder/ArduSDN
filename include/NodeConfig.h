@@ -7,6 +7,7 @@
 // Shared baud rates. Serial0 is debug; controller links use hardware serial.
 const unsigned long DEBUG_BAUD = 115200;
 const unsigned long CONTROL_BAUD = 115200;
+const uint32_t PORT_STATUS_PING_TIMEOUT_US = 100000;
 
 // Stable IDs from AGENTS.md.
 const uint8_t NANO_1_ID = 10;
@@ -17,6 +18,7 @@ const uint8_t UNO_1_ID = 100;
 const uint8_t UNO_2_ID = 200;
 
 const uint8_t SWITCH_PORT_COUNT = 3;
+const uint8_t STP_ROOT_SWITCH_ID = NANO_1_ID;
 
 // Devices the controller actively scans during startup discovery.
 const uint8_t SWITCH_IDS[] = {

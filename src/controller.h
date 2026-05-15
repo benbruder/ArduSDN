@@ -23,10 +23,13 @@ ArduFlowReader readers[] = {
 };
 
 const unsigned long DISCOVERY_QUERY_INTERVAL_MS = 25;
-const uint32_t DISCOVERY_PING_TIMEOUT_US = 50000;
 const uint8_t MAX_DISCOVERED_PORTS = sizeof(SWITCH_IDS) * SWITCH_PORT_COUNT;
 const uint8_t MAX_DISCOVERED_HOSTS = sizeof(HOST_IDS);
 const uint8_t MAX_FORWARDING_DECISIONS = sizeof(SWITCH_IDS) * sizeof(HOST_IDS);
+const uint8_t MAX_PENDING_FLOWS = MAX_FORWARDING_DECISIONS;
+const unsigned long HEALTH_CHECK_CYCLE_MS = 5000;
+const unsigned long HEALTH_CHECK_QUERY_INTERVAL_MS = HEALTH_CHECK_CYCLE_MS / MAX_DISCOVERED_PORTS;
+const unsigned long FLOW_ACK_TIMEOUT_MS = 1000;
 
 // One discovered switch port. peer_id is a Nano ID, Uno ID, or AF_UNKNOWN_ID.
 struct DiscoveredPort {
@@ -35,6 +38,8 @@ struct DiscoveredPort {
   uint8_t peer_id;
   bool online;
   bool blocked;
+  bool block_state_sent;
+  bool last_sent_blocked;
   bool reported;
 };
 
@@ -54,19 +59,42 @@ struct ForwardingDecision {
   bool valid;
 };
 
+// Tracks FLOW_MOD messages until the switch confirms installation with ACK.
+struct PendingFlow {
+  uint8_t switch_id;
+  uint8_t output_port;
+  DataPacket packet;
+  unsigned long sent_ms;
+  bool active;
+  bool retried;
+};
+
 DiscoveredPort discoveredPorts[MAX_DISCOVERED_PORTS];
 DiscoveredHost discoveredHosts[MAX_DISCOVERED_HOSTS];
 ForwardingDecision forwardingDecisions[MAX_FORWARDING_DECISIONS];
+PendingFlow pendingFlows[MAX_PENDING_FLOWS];
 uint8_t discoverySwitchIndex = 0;
 uint8_t discoveryPort = 1;
 unsigned long lastDiscoveryQueryMs = 0;
 bool discoveryComplete = false;
 bool discoveryQueriesSent = false;
 bool stpApplied = false;
+uint8_t healthSwitchIndex = 0;
+uint8_t healthPort = 1;
+unsigned long lastHealthQueryMs = 0;
 
 // Sends one binary ArduFlow control packet.
 void writeArduFlowPacket(HardwareSerial &port, const ArduFlowPacket &message) {
   port.write(reinterpret_cast<const uint8_t *>(&message), sizeof(message));
+}
+
+HardwareSerial *controllerPortForSwitch(uint8_t switchId);
+
+void sendArduFlowToSwitch(uint8_t switchId, const ArduFlowPacket &message) {
+  HardwareSerial *port = controllerPortForSwitch(switchId);
+  if (port != nullptr) {
+    writeArduFlowPacket(*port, message);
+  }
 }
 
 // Logs binary control messages as numbers for Serial Monitor debugging.
@@ -127,6 +155,48 @@ HardwareSerial *controllerPortForSwitch(uint8_t switchId) {
   return nullptr;
 }
 
+void clearPendingFlows() {
+  for (uint8_t i = 0; i < MAX_PENDING_FLOWS; ++i) {
+    pendingFlows[i].active = false;
+  }
+}
+
+void recordPendingFlow(uint8_t switchId, uint8_t outputPort, const DataPacket &packet) {
+  for (uint8_t i = 0; i < MAX_PENDING_FLOWS; ++i) {
+    if (!pendingFlows[i].active) {
+      pendingFlows[i].switch_id = switchId;
+      pendingFlows[i].output_port = outputPort;
+      pendingFlows[i].packet = packet;
+      pendingFlows[i].sent_ms = millis();
+      pendingFlows[i].active = true;
+      pendingFlows[i].retried = false;
+      return;
+    }
+  }
+
+  Serial.println(F("Controller: pending FLOW_MOD table full"));
+}
+
+void sendFlowDeleteAllToSwitch(uint8_t switchId) {
+  ArduFlowPacket deleteAll = {
+    AF_CONTROLLER_ID,
+    switchId,
+    AF_FLOW_DELETE_ALL,
+    AF_UNKNOWN_ID,
+    {0, 0, 0, 0, 0},
+  };
+
+  sendArduFlowToSwitch(switchId, deleteAll);
+  logArduFlowPacket(F("Controller sent FLOW_DELETE_ALL:"), deleteAll);
+}
+
+void sendFlowDeleteAllToAllSwitches() {
+  clearPendingFlows();
+  for (uint8_t i = 0; i < sizeof(SWITCH_IDS); ++i) {
+    sendFlowDeleteAllToSwitch(SWITCH_IDS[i]);
+  }
+}
+
 DiscoveredPort *findDiscoveredPort(uint8_t switchId, uint8_t port) {
   for (uint8_t i = 0; i < MAX_DISCOVERED_PORTS; ++i) {
     if (discoveredPorts[i].reported &&
@@ -152,6 +222,8 @@ DiscoveredPort *allocateDiscoveredPort(uint8_t switchId, uint8_t port) {
       discoveredPorts[i].peer_id = AF_UNKNOWN_ID;
       discoveredPorts[i].online = false;
       discoveredPorts[i].blocked = false;
+      discoveredPorts[i].block_state_sent = false;
+      discoveredPorts[i].last_sent_blocked = false;
       discoveredPorts[i].reported = true;
       return &discoveredPorts[i];
     }
@@ -172,6 +244,16 @@ void recordDiscoveredHost(uint8_t hostId, uint8_t switchId, uint8_t port) {
       discoveredHosts[i].port = port;
       discoveredHosts[i].known = true;
       return;
+    }
+  }
+}
+
+void clearDiscoveredHostOnPort(uint8_t switchId, uint8_t port) {
+  for (uint8_t i = 0; i < MAX_DISCOVERED_HOSTS; ++i) {
+    if (discoveredHosts[i].known &&
+        discoveredHosts[i].switch_id == switchId &&
+        discoveredHosts[i].port == port) {
+      discoveredHosts[i].known = false;
     }
   }
 }
@@ -227,6 +309,19 @@ void sendPortControl(uint8_t switchId, uint8_t portNumber, uint8_t type) {
   logArduFlowPacket(type == AF_BLOCK_PORT ? F("Controller sent BLOCK_PORT:")
                                            : F("Controller sent UNBLOCK_PORT:"),
                     message);
+}
+
+void syncPortControl(DiscoveredPort &portRecord) {
+  if (portRecord.block_state_sent &&
+      portRecord.last_sent_blocked == portRecord.blocked) {
+    return;
+  }
+
+  sendPortControl(portRecord.switch_id,
+                  portRecord.port,
+                  portRecord.blocked ? AF_BLOCK_PORT : AF_UNBLOCK_PORT);
+  portRecord.block_state_sent = true;
+  portRecord.last_sent_blocked = portRecord.blocked;
 }
 
 void setSwitchLinkBlocked(DiscoveredPort &portRecord, bool blocked) {
@@ -331,6 +426,65 @@ void rebuildForwardingDecisions() {
   }
 }
 
+void printTopologySummary() {
+  Serial.println(F("=== Controller Topology ==="));
+  for (uint8_t i = 0; i < MAX_DISCOVERED_PORTS; ++i) {
+    if (!discoveredPorts[i].reported) {
+      continue;
+    }
+
+    Serial.print(F("SW "));
+    Serial.print(discoveredPorts[i].switch_id);
+    Serial.print(F(" port "));
+    Serial.print(discoveredPorts[i].port);
+    Serial.print(F(": "));
+
+    if (!discoveredPorts[i].online) {
+      Serial.println(F("offline"));
+      continue;
+    }
+
+    Serial.print(F("peer "));
+    Serial.print(discoveredPorts[i].peer_id);
+    if (isSwitchId(discoveredPorts[i].peer_id)) {
+      Serial.print(discoveredPorts[i].blocked ? F(" BLOCKED") : F(" FORWARDING"));
+    } else if (isHostId(discoveredPorts[i].peer_id)) {
+      Serial.print(F(" HOST"));
+    } else {
+      Serial.print(F(" UNKNOWN"));
+    }
+    Serial.println();
+  }
+
+  Serial.println(F("=== Controller Hosts ==="));
+  for (uint8_t i = 0; i < MAX_DISCOVERED_HOSTS; ++i) {
+    if (!discoveredHosts[i].known) {
+      continue;
+    }
+
+    Serial.print(F("Host "));
+    Serial.print(discoveredHosts[i].host_id);
+    Serial.print(F(" at switch "));
+    Serial.print(discoveredHosts[i].switch_id);
+    Serial.print(F(" port "));
+    Serial.println(discoveredHosts[i].port);
+  }
+
+  Serial.println(F("=== Controller Routes ==="));
+  for (uint8_t i = 0; i < MAX_FORWARDING_DECISIONS; ++i) {
+    if (!forwardingDecisions[i].valid) {
+      continue;
+    }
+
+    Serial.print(F("From switch "));
+    Serial.print(forwardingDecisions[i].source_switch);
+    Serial.print(F(" to host "));
+    Serial.print(forwardingDecisions[i].dest_host);
+    Serial.print(F(" output port "));
+    Serial.println(forwardingDecisions[i].output_port);
+  }
+}
+
 void applySpanningTree() {
   for (uint8_t i = 0; i < MAX_DISCOVERED_PORTS; ++i) {
     if (discoveredPorts[i].reported &&
@@ -346,9 +500,11 @@ void applySpanningTree() {
   uint8_t queue[sizeof(SWITCH_IDS)] = {0};
   uint8_t head = 0;
   uint8_t tail = 0;
+  uint8_t rootIndex = switchIndex(STP_ROOT_SWITCH_ID);
+  uint8_t rootSwitch = rootIndex == AF_UNKNOWN_ID ? SWITCH_IDS[0] : STP_ROOT_SWITCH_ID;
 
-  visited[0] = true;
-  queue[tail] = SWITCH_IDS[0];
+  visited[rootIndex == AF_UNKNOWN_ID ? 0 : rootIndex] = true;
+  queue[tail] = rootSwitch;
   ++tail;
 
   while (head < tail) {
@@ -382,14 +538,14 @@ void applySpanningTree() {
       continue;
     }
 
-    sendPortControl(discoveredPorts[i].switch_id,
-                    discoveredPorts[i].port,
-                    discoveredPorts[i].blocked ? AF_BLOCK_PORT : AF_UNBLOCK_PORT);
+    syncPortControl(discoveredPorts[i]);
   }
 
   stpApplied = true;
   discoveryComplete = true;
   rebuildForwardingDecisions();
+  sendFlowDeleteAllToAllSwitches();
+  printTopologySummary();
   Serial.println(F("Controller: STP applied; routes rebuilt from forwarding ports"));
 }
 
@@ -413,10 +569,9 @@ void sendFlowMod(uint8_t requestingSwitch, const DataPacket &missedPacket) {
     return;
   }
 
-  HardwareSerial *port = controllerPortForSwitch(requestingSwitch);
   uint8_t outputPort = routeOutputPort(requestingSwitch, missedPacket.dest_id);
 
-  if (port == nullptr || outputPort == AF_NO_PORT) {
+  if (controllerPortForSwitch(requestingSwitch) == nullptr || outputPort == AF_NO_PORT) {
     Serial.println(F("Controller: no route for ROUTE_REQ"));
     return;
   }
@@ -429,7 +584,8 @@ void sendFlowMod(uint8_t requestingSwitch, const DataPacket &missedPacket) {
     missedPacket,
   };
 
-  writeArduFlowPacket(*port, flowMod);
+  sendArduFlowToSwitch(requestingSwitch, flowMod);
+  recordPendingFlow(requestingSwitch, outputPort, missedPacket);
   logArduFlowPacket(F("Controller sent FLOW_MOD:"), flowMod);
 }
 
@@ -454,6 +610,18 @@ void handleAck(const ArduFlowPacket &message) {
   Serial.print(message.source_id);
   Serial.print(F(" for port "));
   Serial.println(message.port);
+
+  for (uint8_t i = 0; i < MAX_PENDING_FLOWS; ++i) {
+    if (pendingFlows[i].active &&
+        pendingFlows[i].switch_id == message.source_id &&
+        pendingFlows[i].output_port == message.port) {
+      pendingFlows[i].active = false;
+      Serial.println(F("Controller: pending FLOW_MOD acknowledged"));
+      return;
+    }
+  }
+
+  Serial.println(F("Controller: ACK did not match pending FLOW_MOD"));
 }
 
 // PORT_STATUS lets switches notify the controller about usable or failed links.
@@ -465,15 +633,36 @@ void handlePortStatus(const ArduFlowPacket &message) {
   Serial.print(F(" type "));
   Serial.println(message.type);
 
+  DiscoveredPort *existingPort = findDiscoveredPort(message.source_id, message.port);
+  bool wasKnown = existingPort != nullptr;
+  bool wasOnline = existingPort != nullptr && existingPort->online;
+  uint8_t previousPeer = existingPort != nullptr ? existingPort->peer_id : AF_UNKNOWN_ID;
   DiscoveredPort *discoveredPort = allocateDiscoveredPort(message.source_id, message.port);
+  bool nowOnline = message.type == AF_PORT_STATUS_ONLINE;
+  uint8_t nowPeer = nowOnline ? message.packet.source_id : AF_UNKNOWN_ID;
+  bool isChanged = !wasKnown || wasOnline != nowOnline || previousPeer != nowPeer;
+
   if (discoveredPort != nullptr) {
-    discoveredPort->online = message.type == AF_PORT_STATUS_ONLINE;
-    discoveredPort->peer_id = discoveredPort->online ? message.packet.source_id : AF_UNKNOWN_ID;
+    discoveredPort->online = nowOnline;
+    discoveredPort->peer_id = nowPeer;
     discoveredPort->blocked = false;
+    if (isChanged) {
+      discoveredPort->block_state_sent = false;
+      discoveredPort->last_sent_blocked = false;
+    }
   }
 
   if (message.type == AF_PORT_STATUS_ONLINE) {
+    clearDiscoveredHostOnPort(message.source_id, message.port);
     recordDiscoveredHost(message.packet.source_id, message.source_id, message.port);
+  }
+
+  if (message.type == AF_PORT_STATUS_OFFLINE) {
+    clearDiscoveredHostOnPort(message.source_id, message.port);
+  }
+
+  if (stpApplied && isChanged) {
+    applySpanningTree();
   }
 
   if (message.type == AF_PORT_STATUS_OFFLINE) {
@@ -504,7 +693,7 @@ void sendPortStatusQuery(uint8_t switchId, uint8_t portNumber) {
     switchId,
     AF_PORT_STATUS_QUERY,
     portNumber,
-    {AF_CONTROLLER_ID, AF_UNKNOWN_ID, DATA_APP_PING_REQUEST, DATA_SETTING_TIMEOUT_US, DISCOVERY_PING_TIMEOUT_US},
+    {AF_CONTROLLER_ID, AF_UNKNOWN_ID, DATA_APP_PING_REQUEST, DATA_SETTING_TIMEOUT_US, PORT_STATUS_PING_TIMEOUT_US},
   };
 
   writeArduFlowPacket(*port, query);
@@ -553,6 +742,56 @@ void pollDiscovery() {
   if (discoveryPort > SWITCH_PORT_COUNT) {
     discoveryPort = 1;
     ++discoverySwitchIndex;
+  }
+}
+
+void pollHealthCheck() {
+  if (!discoveryComplete || !stpApplied) {
+    return;
+  }
+
+  unsigned long now = millis();
+  if (lastHealthQueryMs != 0 && now - lastHealthQueryMs < HEALTH_CHECK_QUERY_INTERVAL_MS) {
+    return;
+  }
+
+  sendPortStatusQuery(SWITCH_IDS[healthSwitchIndex], healthPort);
+  lastHealthQueryMs = now;
+
+  ++healthPort;
+  if (healthPort > SWITCH_PORT_COUNT) {
+    healthPort = 1;
+    ++healthSwitchIndex;
+    if (healthSwitchIndex >= sizeof(SWITCH_IDS)) {
+      healthSwitchIndex = 0;
+    }
+  }
+}
+
+void pollPendingFlowAcks() {
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < MAX_PENDING_FLOWS; ++i) {
+    if (!pendingFlows[i].active || now - pendingFlows[i].sent_ms < FLOW_ACK_TIMEOUT_MS) {
+      continue;
+    }
+
+    ArduFlowPacket retry = {
+      AF_CONTROLLER_ID,
+      pendingFlows[i].switch_id,
+      AF_FLOW_ADD_DST_OVERWRITE,
+      pendingFlows[i].output_port,
+      pendingFlows[i].packet,
+    };
+
+    if (!pendingFlows[i].retried) {
+      sendArduFlowToSwitch(pendingFlows[i].switch_id, retry);
+      pendingFlows[i].sent_ms = now;
+      pendingFlows[i].retried = true;
+      logArduFlowPacket(F("Controller retried FLOW_MOD:"), retry);
+    } else {
+      pendingFlows[i].active = false;
+      logArduFlowPacket(F("Controller dropped unacknowledged FLOW_MOD:"), retry);
+    }
   }
 }
 
@@ -608,6 +847,8 @@ void roleSetup() {
 
 void roleLoop() {
   pollDiscovery();
+  pollHealthCheck();
+  pollPendingFlowAcks();
 
   // Poll every controller link so one idle switch cannot block another.
   for (uint8_t i = 0; i < sizeof(readers) / sizeof(readers[0]); ++i) {
