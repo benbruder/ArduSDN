@@ -51,9 +51,11 @@ const uint8_t AF_PORT_STATUS_ONLINE = 31;
 const uint8_t AF_PORT_STATUS_OFFLINE = 32;
 const uint8_t AF_BLOCK_PORT = 40;
 const uint8_t AF_UNBLOCK_PORT = 41;
+const uint8_t AF_SET_SWITCH_ID = 100;
 
 const uint8_t AF_CONTROLLER_ID = 0;
 const uint8_t AF_NO_PORT = 0;
 const uint8_t AF_UNKNOWN_ID = 255;
+const uint8_t AF_UNASSIGNED_ID = AF_UNKNOWN_ID;
 
 #endif

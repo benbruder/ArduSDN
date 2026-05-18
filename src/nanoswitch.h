@@ -7,12 +7,8 @@
 #include "NodeConfig.h"
 #include "SdnProtocol.h"
 
-#ifndef NODE_ID
-#define NODE_ID NANO_1_ID
-#endif
-
 namespace {
-const uint8_t SWITCH_ID = NODE_ID;
+uint8_t switchId = AF_UNASSIGNED_ID;
 const unsigned long SWITCH_PORT_BAUD = 9600;
 const uint8_t FLOW_TABLE_SIZE = 8;
 const uint8_t STATUS_LED_PIN = A5;
@@ -129,7 +125,7 @@ void pollStatusLed() {
 
 void sendAck(uint8_t portNumber) {
   ArduFlowPacket ack = {
-    SWITCH_ID,
+    switchId,
     AF_CONTROLLER_ID,
     AF_ACK,
     portNumber,
@@ -265,7 +261,7 @@ void deleteRulesForMessage(const ArduFlowPacket &message) {
 
 void sendRouteRequest(uint8_t ingressPort, const DataPacket &packet) {
   ArduFlowPacket request = {
-    SWITCH_ID,
+    switchId,
     AF_CONTROLLER_ID,
     AF_ROUTE_REQ,
     ingressPort,
@@ -297,7 +293,7 @@ void replyToPing(uint8_t ingressPort, const DataPacket &packet) {
   }
 
   DataPacket reply = {
-    SWITCH_ID,
+    switchId,
     packet.source_id,
     DATA_APP_PING_REPLY,
     DATA_SETTING_NONE,
@@ -309,7 +305,7 @@ void replyToPing(uint8_t ingressPort, const DataPacket &packet) {
 
 void sendPortStatus(uint8_t type, uint8_t portNumber, const DataPacket &packet) {
   ArduFlowPacket status = {
-    SWITCH_ID,
+    switchId,
     AF_CONTROLLER_ID,
     type,
     portNumber,
@@ -374,7 +370,15 @@ void startPortStatusQuery(const ArduFlowPacket &message) {
 }
 
 void handleControllerMessage(const ArduFlowPacket &message) {
-  if (message.dest_id != SWITCH_ID) {
+  if (message.type == AF_SET_SWITCH_ID &&
+      (message.dest_id == AF_UNASSIGNED_ID || message.dest_id == switchId)) {
+    switchId = message.port;
+    startStatusBlink(SIGNAL_PACKET_BLINK_INTERVAL_MS);
+    sendAck(switchId);
+    return;
+  }
+
+  if (message.dest_id != switchId) {
     return;
   }
 

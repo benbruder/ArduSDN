@@ -23,6 +23,7 @@ ArduFlowReader readers[] = {
 };
 
 const unsigned long DISCOVERY_QUERY_INTERVAL_MS = 25;
+const unsigned long SWITCH_ID_ASSIGNMENT_SETTLE_MS = 500;
 const uint8_t MAX_DISCOVERED_PORTS = sizeof(SWITCH_IDS) * SWITCH_PORT_COUNT;
 const uint8_t MAX_DISCOVERED_HOSTS = sizeof(HOST_IDS);
 const uint8_t MAX_FORWARDING_DECISIONS = sizeof(SWITCH_IDS) * sizeof(HOST_IDS);
@@ -76,6 +77,8 @@ PendingFlow pendingFlows[MAX_PENDING_FLOWS];
 uint8_t discoverySwitchIndex = 0;
 uint8_t discoveryPort = 1;
 unsigned long lastDiscoveryQueryMs = 0;
+unsigned long assignmentStartMs = 0;
+bool switchIdsAssigned = false;
 bool discoveryComplete = false;
 bool discoveryQueriesSent = false;
 bool stpApplied = false;
@@ -89,12 +92,26 @@ void writeArduFlowPacket(HardwareSerial &port, const ArduFlowPacket &message) {
 }
 
 HardwareSerial *controllerPortForSwitch(uint8_t switchId);
+void logArduFlowPacket(const __FlashStringHelper *direction, const ArduFlowPacket &message);
 
 void sendArduFlowToSwitch(uint8_t switchId, const ArduFlowPacket &message) {
   HardwareSerial *port = controllerPortForSwitch(switchId);
   if (port != nullptr) {
     writeArduFlowPacket(*port, message);
   }
+}
+
+void sendSwitchIdAssignment(uint8_t switchId) {
+  ArduFlowPacket message = {
+    AF_CONTROLLER_ID,
+    AF_UNASSIGNED_ID,
+    AF_SET_SWITCH_ID,
+    switchId,
+    {0, 0, 0, 0, 0},
+  };
+
+  sendArduFlowToSwitch(switchId, message);
+  logArduFlowPacket(F("SENT"), message);
 }
 
 void printNodeName(uint8_t nodeId) {
@@ -138,6 +155,7 @@ void printTypeName(uint8_t type) {
     case AF_PORT_STATUS_OFFLINE: Serial.print(F("PORT_STATUS_OFFLINE")); break;
     case AF_BLOCK_PORT: Serial.print(F("BLOCK_PORT")); break;
     case AF_UNBLOCK_PORT: Serial.print(F("UNBLOCK_PORT")); break;
+    case AF_SET_SWITCH_ID: Serial.print(F("SET_SWITCH_ID")); break;
     default: Serial.print(type); break;
   }
 }
@@ -703,6 +721,11 @@ void handleAck(const ArduFlowPacket &message) {
     }
   }
 
+  if (isSwitchId(message.source_id) && message.port == message.source_id) {
+    Serial.println(F("Controller: switch ID assignment acknowledged"));
+    return;
+  }
+
   Serial.println(F("Controller: ACK did not match pending FLOW_MOD"));
 }
 
@@ -799,6 +822,15 @@ bool allDiscoveryReportsReceived() {
 }
 
 void pollDiscovery() {
+  if (!switchIdsAssigned) {
+    if (millis() - assignmentStartMs >= SWITCH_ID_ASSIGNMENT_SETTLE_MS) {
+      switchIdsAssigned = true;
+      Serial.println(F("Controller: switch ID assignment settle period complete"));
+    } else {
+      return;
+    }
+  }
+
   if (discoveryComplete) {
     return;
   }
@@ -899,6 +931,11 @@ void handleArduFlowPacket(const ArduFlowPacket &message, const char *inputName) 
     return;
   }
 
+  if (message.type == AF_SET_SWITCH_ID) {
+    Serial.println(F("Controller: switch ID assignment acknowledged"));
+    return;
+  }
+
   if (message.type >= AF_PORT_STATUS_QUERY && message.type <= AF_PORT_STATUS_OFFLINE) {
     handlePortStatus(message);
     return;
@@ -930,6 +967,9 @@ void roleSetup() {
   Serial3.begin(CONTROL_BAUD);
 
   Serial.println(F("Mega 2 ArduFlow controller ready"));
+  sendSwitchIdAssignment(NANO_2_ID);
+  sendSwitchIdAssignment(NANO_3_ID);
+  assignmentStartMs = millis();
 }
 
 void roleLoop() {

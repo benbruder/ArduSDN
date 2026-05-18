@@ -151,7 +151,7 @@ struct DataPacket {  // Used to send actual data
 struct ArduFlowPacket { // used for communication between controller and switches
     uint8_t source_id;      
     uint8_t dest_id;
-    uint8_t type;         // 0 = ACK, 1 = ROUTE_REQ, 20-29 = FLOW_MOD, 30-32 = PORT_STATUS, 40 = BLOCK_PORT, 41 = UNBLOCK_PORT
+    uint8_t type;         // 0 = ACK, 1 = ROUTE_REQ, 20-29 = FLOW_MOD, 30-32 = PORT_STATUS, 40 = BLOCK_PORT, 41 = UNBLOCK_PORT, 100 = SET_SWITCH_ID
     uint8_t port;    // either 1, 2, or 3 depending on the port the packet in question came from
     DataPacket packet;
 }
@@ -178,6 +178,9 @@ BLOCK_PORT:
 
 UNBLOCK_PORT:
  - 41: Return 'port' to normal forwarding.
+
+SET_SWITCH_ID:
+ - 100: set a switch's ID to the value in 'port'
 
 
 source_id and dest_id will (when used in a normal packet) will be either 100 for Uno 1 or 200 for Uno 2. When used in a signaling packet (i.e. only in communication between a switch and the controller), the controller has an id of 0, Nano 1 has an id of 10, Nano 2 has an id of 20, Nano 3 has an id of 30, Nano 4 has an id of 40. If the port doesn't matter, it's set to 255, as shown above.
