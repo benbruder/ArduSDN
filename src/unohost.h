@@ -19,7 +19,7 @@ const uint8_t LED_MESSAGE_DISPLAY_PIN = 4;
 const uint8_t LED_QUEUE_FULL_PIN = 5;
 const uint8_t BUTTON_COMPOSE_PIN = A0;
 const uint8_t BUTTON_ACTION_PIN = A1;
-const unsigned long HOST_SERIAL_BAUD = CONTROL_BAUD;
+const unsigned long HOST_SERIAL_BAUD = SWITCH_PORT_BAUD;
 const unsigned long DEBOUNCE_MS = 30;
 const unsigned long SENT_DISPLAY_MS = 1000;
 const unsigned long QUEUE_FULL_FLASH_MS = 1000;
@@ -165,7 +165,8 @@ void updateButton(ButtonState &button, uint8_t pin) {
   }
 }
 
-// Host packets use hardware Serial. D2 is treated as a TX-enable/indicator line.
+// Host packets use hardware Serial at the Nano NeoSWSerial port rate.
+// D2 is the host-side trigger line wired to the selected Nano port interrupt input.
 void writeDataPacket(const DataPacket &packet) {
   digitalWrite(HOST_TX_ENABLE_PIN, HIGH);
   delayMicroseconds(50);

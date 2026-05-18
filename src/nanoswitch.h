@@ -27,13 +27,19 @@ ISR(PCINT2_vect) {
 
 namespace {
 uint8_t switchId = AF_UNASSIGNED_ID;
-const unsigned long SWITCH_PORT_BAUD = 9600;
 const uint8_t FLOW_TABLE_SIZE = 8;
 const uint8_t STATUS_LED_PIN = A5;
 const unsigned long NORMAL_PACKET_BLINK_INTERVAL_MS = 250;
 const unsigned long SIGNAL_PACKET_BLINK_INTERVAL_MS = 500;
 const uint8_t STATUS_LED_TOGGLE_COUNT = 4;
 const unsigned long TRIGGER_READ_WINDOW_MS = 25;
+const uint8_t DIAGNOSTIC_LED_PIN = LED_BUILTIN;
+const unsigned long DIAGNOSTIC_HEARTBEAT_INTERVAL_MS = 2000;
+const unsigned long DIAGNOSTIC_BURST_INTERVAL_MS = 100;
+const unsigned long DIAGNOSTIC_QUERY_INTERVAL_MS = 125;
+const uint8_t ID_ASSIGNED_DIAGNOSTIC_TOGGLES = 6;
+const uint8_t ROUTE_REQ_DIAGNOSTIC_TOGGLES = 4;
+const uint8_t TABLE_FULL_DIAGNOSTIC_TOGGLES = 10;
 
 struct SwitchPort {
   NeoSWSerial *serial;
@@ -77,6 +83,11 @@ bool statusLedState = false;
 uint8_t statusLedTogglesRemaining = 0;
 unsigned long statusLedIntervalMs = 0;
 unsigned long lastStatusLedToggleMs = 0;
+bool diagnosticLedState = false;
+bool diagnosticBurstActive = false;
+uint8_t diagnosticTogglesRemaining = 0;
+unsigned long diagnosticIntervalMs = 0;
+unsigned long lastDiagnosticToggleMs = 0;
 // Trigger pins choose which NeoSWSerial port should listen next.
 // EnableInterrupt sets these flags from A0-A2 without claiming NeoSWSerial's RX vectors.
 volatile bool triggerPending[SWITCH_PORT_COUNT] = {false};
@@ -156,6 +167,63 @@ void pollStatusLed() {
     statusLedActive = false;
     statusLedState = false;
     digitalWrite(STATUS_LED_PIN, LOW);
+  }
+}
+
+// D13 is a close-range diagnostic LED: heartbeat when assigned, bursts for notable events.
+void startDiagnosticBurst(uint8_t toggles, unsigned long intervalMs) {
+  diagnosticBurstActive = true;
+  diagnosticLedState = true;
+  diagnosticTogglesRemaining = toggles;
+  diagnosticIntervalMs = intervalMs;
+  lastDiagnosticToggleMs = millis();
+  digitalWrite(DIAGNOSTIC_LED_PIN, HIGH);
+}
+
+void pollDiagnosticLed() {
+  unsigned long now = millis();
+
+  if (diagnosticBurstActive) {
+    if (now - lastDiagnosticToggleMs < diagnosticIntervalMs) {
+      return;
+    }
+
+    lastDiagnosticToggleMs = now;
+    diagnosticLedState = !diagnosticLedState;
+    digitalWrite(DIAGNOSTIC_LED_PIN, diagnosticLedState ? HIGH : LOW);
+
+    if (diagnosticTogglesRemaining > 0) {
+      --diagnosticTogglesRemaining;
+    }
+
+    if (diagnosticTogglesRemaining == 0) {
+      diagnosticBurstActive = false;
+      diagnosticLedState = false;
+      digitalWrite(DIAGNOSTIC_LED_PIN, LOW);
+      lastDiagnosticToggleMs = now;
+    }
+    return;
+  }
+
+  if (pendingQuery.active) {
+    if (now - lastDiagnosticToggleMs >= DIAGNOSTIC_QUERY_INTERVAL_MS) {
+      lastDiagnosticToggleMs = now;
+      diagnosticLedState = !diagnosticLedState;
+      digitalWrite(DIAGNOSTIC_LED_PIN, diagnosticLedState ? HIGH : LOW);
+    }
+    return;
+  }
+
+  if (switchId == AF_UNASSIGNED_ID) {
+    diagnosticLedState = false;
+    digitalWrite(DIAGNOSTIC_LED_PIN, LOW);
+    return;
+  }
+
+  if (now - lastDiagnosticToggleMs >= DIAGNOSTIC_HEARTBEAT_INTERVAL_MS) {
+    lastDiagnosticToggleMs = now;
+    diagnosticLedState = !diagnosticLedState;
+    digitalWrite(DIAGNOSTIC_LED_PIN, diagnosticLedState ? HIGH : LOW);
   }
 }
 
@@ -262,6 +330,7 @@ bool installFlowRule(const ArduFlowPacket &message) {
   }
 
   if (target == nullptr) {
+    startDiagnosticBurst(TABLE_FULL_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
     return false;
   }
 
@@ -307,6 +376,7 @@ void sendRouteRequest(uint8_t ingressPort, const DataPacket &packet) {
   };
 
   writeArduFlowPacket(request);
+  startDiagnosticBurst(ROUTE_REQ_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
 }
 
 void forwardPacket(uint8_t ingressPort, const DataPacket &packet) {
@@ -440,6 +510,7 @@ void handleControllerMessage(const ArduFlowPacket &message) {
       (message.dest_id == AF_UNASSIGNED_ID || message.dest_id == switchId)) {
     switchId = message.port;
     startStatusBlink(SIGNAL_PACKET_BLINK_INTERVAL_MS);
+    startDiagnosticBurst(ID_ASSIGNED_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
     sendAck(switchId);
     return;
   }
@@ -505,7 +576,9 @@ void pollPendingQuery() {
 void roleSetup() {
   Serial.begin(CONTROL_BAUD);
   pinMode(STATUS_LED_PIN, OUTPUT);
+  pinMode(DIAGNOSTIC_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
+  digitalWrite(DIAGNOSTIC_LED_PIN, LOW);
 
   for (uint8_t i = 0; i < SWITCH_PORT_COUNT; ++i) {
     switchPorts[i].serial->begin(SWITCH_PORT_BAUD);
@@ -524,6 +597,7 @@ void roleLoop() {
   pollTriggeredDataPorts();
   pollPendingQuery();
   pollStatusLed();
+  pollDiagnosticLed();
 }
 
 #endif

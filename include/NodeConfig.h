@@ -7,6 +7,7 @@
 // Shared baud rates. Serial0 is debug; controller links use hardware serial.
 const unsigned long DEBUG_BAUD = 115200;
 const unsigned long CONTROL_BAUD = 115200;
+const unsigned long SWITCH_PORT_BAUD = 9600;
 const uint32_t PORT_STATUS_PING_TIMEOUT_US = 100000;
 
 // Stable IDs from AGENTS.md.

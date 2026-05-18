@@ -194,13 +194,15 @@ Expected environments:
 - mega2_controller
 - mega1_relay
 - nano_switch
-- uno_host
+- uno1_host
+- uno2_host
 
 Build commands:
 pio run -e mega2_controller
 pio run -e mega1_relay
 pio run -e nano_switch
-pio run -e uno_host
+pio run -e uno1_host
+pio run -e uno2_host
 
 ## Important Instruction
 
@@ -240,6 +242,19 @@ The default display is "----". The display will change in one of these scenarios
  - The data will the be stored in a queue. If there is data in the first queue slot, the DP of Digit 1 will turn on. The same goes for the other 3 DPs for the second, third, and fourth matching packets. The queue can only hold 4 elements, and if a 5th matching packet is received when the queue is full, LED 2 will flash for 1 second, and that packet will then be discarded.
  - When Button 2 is pressed when "----" is displayed and at least 1 message is in the queue (as marked by the DPs), the data will be popped off of the queue (with the DPs to "decrement" accordingly) and shown on the display while LED 1 blinks once per second. When either button is pressed when the received data is being displayed, the message will be cleared from the screen and the default "----" will be displayed once more. However, when Button 2 is pressed when there is a number displayed (i.e. while a message to send is being composed) from using Button 1 (as described in 1.), it will always trigger a send action, even if DPs are lit (i.e. when there are matching packets in the receive queue).
  - Since the display can only show 2 bytes (4 hex digits), any data more than 2 bytes will be truncated so that only 16 least significant bits will (in hex format) be displayed.
+
+ Host-to-switch connection:
+- Host Unos do not connect to Nano hardware Serial.
+- Host Unos connect to one of the Nano's three NeoSWSerial network ports, the same way another Nano would.
+- Uno hardware Serial TX/RX carries DataPacket traffic to/from the selected Nano NeoSWSerial RX/TX pins.
+- Uno pin D2 is the host's outbound trigger pin.
+- Uno D2 must be wired to the selected Nano port's interrupt input:
+  - Nano port 1 interrupt input: A0
+  - Nano port 2 interrupt input: A1
+  - Nano port 3 interrupt input: A2
+- Before the Uno sends a DataPacket, it drives D2 HIGH, waits 50 microseconds, writes the 8-byte DataPacket on Serial, flushes, then drives D2 LOW.
+- The Nano uses that interrupt input to select the corresponding NeoSWSerial port and read the incoming host packet.
+
 
  #### APPROVED CODEX SUGGESTIONS:
 
