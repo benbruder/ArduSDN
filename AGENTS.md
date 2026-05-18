@@ -76,6 +76,15 @@ Other:
 - Controller may send FLOW_DELETE_ALL after topology/STP changes to clear stale switch rules.
 - Controller roots STP at STP_ROOT_SWITCH_ID.
 
+Minimum "useful debugging info" to be outputted:
+- Startup message
+- Whenever STP is run, and its results in human-readable format
+- Whenever a signal packet is sent, and the human-readable form of that packet
+    - e.g. if a packet is sent to N2 to block port 3, output: "SENT; To: N2; From: M2; Type: BLOCK_PORT; Port: 3; Packet: {a human readable form of the packet, if there is one}"
+- Whenever a signal packet is received, and the human-readable form of that packet
+- Whenever a port is detected to be down
+- Whenever a switch is detected to be down
+- Any other useful information for debugging
 
 ### Mega 1: Relay
 
@@ -100,6 +109,8 @@ Responsibilities:
 - Accept FLOW_MOD, PORT_STATUS, and BLOCK_PORT/UNBLOCK_PORT messages.
 - Avoid Arduino String.
 - Use fixed-size buffers.
+
+Additionally, there is an output LED on pin A5 of each switch. When receiving a normal packet (i.e. originating from a Host), blink this LED twice in one second. When receiving a signaling packet (i.e. originating from the Mega), blink this LED twice in two seconds (i.e. on for .5, off for .5, twice). Make sure this does not use "delay()" or other functions that pause execution for any amount of time; instead use asynchronous delay methods.
 
 ### Uno Hosts
 
@@ -226,3 +237,6 @@ The default display is "----". The display will change in one of these scenarios
  - The data will the be stored in a queue. If there is data in the first queue slot, the DP of Digit 1 will turn on. The same goes for the other 3 DPs for the second, third, and fourth matching packets. The queue can only hold 4 elements, and if a 5th matching packet is received when the queue is full, LED 2 will flash for 1 second, and that packet will then be discarded.
  - When Button 2 is pressed when "----" is displayed and at least 1 message is in the queue (as marked by the DPs), the data will be popped off of the queue (with the DPs to "decrement" accordingly) and shown on the display while LED 1 blinks once per second. When either button is pressed when the received data is being displayed, the message will be cleared from the screen and the default "----" will be displayed once more. However, when Button 2 is pressed when there is a number displayed (i.e. while a message to send is being composed) from using Button 1 (as described in 1.), it will always trigger a send action, even if DPs are lit (i.e. when there are matching packets in the receive queue).
  - Since the display can only show 2 bytes (4 hex digits), any data more than 2 bytes will be truncated so that only 16 least significant bits will (in hex format) be displayed.
+
+ #### APPROVED CODEX SUGGESTIONS:
+

@@ -97,27 +97,111 @@ void sendArduFlowToSwitch(uint8_t switchId, const ArduFlowPacket &message) {
   }
 }
 
-// Logs binary control messages as numbers for Serial Monitor debugging.
-void logArduFlowPacket(const __FlashStringHelper *prefix, const ArduFlowPacket &message) {
-  Serial.print(prefix);
-  Serial.print(F(" src="));
-  Serial.print(message.source_id);
-  Serial.print(F(" dst="));
-  Serial.print(message.dest_id);
-  Serial.print(F(" type="));
-  Serial.print(message.type);
-  Serial.print(F(" port="));
-  Serial.print(message.port);
-  Serial.print(F(" pkt.src="));
-  Serial.print(message.packet.source_id);
-  Serial.print(F(" pkt.dst="));
-  Serial.print(message.packet.dest_id);
-  Serial.print(F(" app="));
-  Serial.print(message.packet.app_id);
-  Serial.print(F(" setting="));
-  Serial.print(message.packet.setting);
-  Serial.print(F(" data="));
-  Serial.println(message.packet.data);
+void printNodeName(uint8_t nodeId) {
+  if (nodeId == AF_CONTROLLER_ID) {
+    Serial.print(F("M2"));
+  } else if (nodeId == NANO_1_ID) {
+    Serial.print(F("N1"));
+  } else if (nodeId == NANO_2_ID) {
+    Serial.print(F("N2"));
+  } else if (nodeId == NANO_3_ID) {
+    Serial.print(F("N3"));
+  } else if (nodeId == NANO_4_ID) {
+    Serial.print(F("N4"));
+  } else if (nodeId == UNO_1_ID) {
+    Serial.print(F("U1"));
+  } else if (nodeId == UNO_2_ID) {
+    Serial.print(F("U2"));
+  } else if (nodeId == AF_UNKNOWN_ID) {
+    Serial.print(F("UNKNOWN"));
+  } else {
+    Serial.print(nodeId);
+  }
+}
+
+void printTypeName(uint8_t type) {
+  switch (type) {
+    case AF_ACK: Serial.print(F("ACK")); break;
+    case AF_ROUTE_REQ: Serial.print(F("ROUTE_REQ")); break;
+    case AF_FLOW_ADD_SRC_NO_OVERWRITE: Serial.print(F("FLOW_ADD_SRC")); break;
+    case AF_FLOW_ADD_SRC_OVERWRITE: Serial.print(F("FLOW_ADD_SRC_OVERWRITE")); break;
+    case AF_FLOW_ADD_DST_NO_OVERWRITE: Serial.print(F("FLOW_ADD_DST")); break;
+    case AF_FLOW_ADD_DST_OVERWRITE: Serial.print(F("FLOW_ADD_DST_OVERWRITE")); break;
+    case AF_FLOW_ADD_SRC_DST_NO_OVERWRITE: Serial.print(F("FLOW_ADD_SRC_DST")); break;
+    case AF_FLOW_ADD_SRC_DST_OVERWRITE: Serial.print(F("FLOW_ADD_SRC_DST_OVERWRITE")); break;
+    case AF_FLOW_DELETE_OUTPUT_PORT: Serial.print(F("FLOW_DELETE_OUTPUT_PORT")); break;
+    case AF_FLOW_DELETE_SRC: Serial.print(F("FLOW_DELETE_SRC")); break;
+    case AF_FLOW_DELETE_DST: Serial.print(F("FLOW_DELETE_DST")); break;
+    case AF_FLOW_DELETE_ALL: Serial.print(F("FLOW_DELETE_ALL")); break;
+    case AF_PORT_STATUS_QUERY: Serial.print(F("PORT_STATUS_QUERY")); break;
+    case AF_PORT_STATUS_ONLINE: Serial.print(F("PORT_STATUS_ONLINE")); break;
+    case AF_PORT_STATUS_OFFLINE: Serial.print(F("PORT_STATUS_OFFLINE")); break;
+    case AF_BLOCK_PORT: Serial.print(F("BLOCK_PORT")); break;
+    case AF_UNBLOCK_PORT: Serial.print(F("UNBLOCK_PORT")); break;
+    default: Serial.print(type); break;
+  }
+}
+
+void printDataPacket(const DataPacket &packet) {
+  Serial.print(F("{src: "));
+  printNodeName(packet.source_id);
+  Serial.print(F("; dst: "));
+  printNodeName(packet.dest_id);
+  Serial.print(F("; app: "));
+  Serial.print(packet.app_id);
+  Serial.print(F("; setting: "));
+  Serial.print(packet.setting);
+  Serial.print(F("; data: "));
+  Serial.print(packet.data);
+  Serial.print(F("}"));
+}
+
+void logPortDown(uint8_t switchId, uint8_t portNumber) {
+  Serial.print(F("DOWN; Switch: "));
+  printNodeName(switchId);
+  Serial.print(F("; Port: "));
+  Serial.println(portNumber);
+}
+
+bool switchHasOnlinePort(uint8_t switchId) {
+  for (uint8_t i = 0; i < MAX_DISCOVERED_PORTS; ++i) {
+    if (discoveredPorts[i].reported &&
+        discoveredPorts[i].switch_id == switchId &&
+        discoveredPorts[i].online) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void logSwitchDownIfNeeded(uint8_t switchId) {
+  if (switchHasOnlinePort(switchId)) {
+    return;
+  }
+
+  Serial.print(F("DOWN; Switch: "));
+  printNodeName(switchId);
+  Serial.println(F("; All reported ports offline"));
+}
+
+void logArduFlowPacket(const __FlashStringHelper *direction, const ArduFlowPacket &message) {
+  Serial.print(direction);
+  Serial.print(F("; To: "));
+  printNodeName(message.dest_id);
+  Serial.print(F("; From: "));
+  printNodeName(message.source_id);
+  Serial.print(F("; Type: "));
+  printTypeName(message.type);
+  Serial.print(F("; Port: "));
+  if (message.port == AF_UNKNOWN_ID) {
+    Serial.print(F("N/A"));
+  } else {
+    Serial.print(message.port);
+  }
+  Serial.print(F("; Packet: "));
+  printDataPacket(message.packet);
+  Serial.println();
 }
 
 bool isSwitchId(uint8_t deviceId) {
@@ -187,7 +271,7 @@ void sendFlowDeleteAllToSwitch(uint8_t switchId) {
   };
 
   sendArduFlowToSwitch(switchId, deleteAll);
-  logArduFlowPacket(F("Controller sent FLOW_DELETE_ALL:"), deleteAll);
+  logArduFlowPacket(F("SENT"), deleteAll);
 }
 
 void sendFlowDeleteAllToAllSwitches() {
@@ -306,9 +390,7 @@ void sendPortControl(uint8_t switchId, uint8_t portNumber, uint8_t type) {
   };
 
   writeArduFlowPacket(*port, message);
-  logArduFlowPacket(type == AF_BLOCK_PORT ? F("Controller sent BLOCK_PORT:")
-                                           : F("Controller sent UNBLOCK_PORT:"),
-                    message);
+  logArduFlowPacket(F("SENT"), message);
 }
 
 void syncPortControl(DiscoveredPort &portRecord) {
@@ -586,7 +668,7 @@ void sendFlowMod(uint8_t requestingSwitch, const DataPacket &missedPacket) {
 
   sendArduFlowToSwitch(requestingSwitch, flowMod);
   recordPendingFlow(requestingSwitch, outputPort, missedPacket);
-  logArduFlowPacket(F("Controller sent FLOW_MOD:"), flowMod);
+  logArduFlowPacket(F("SENT"), flowMod);
 }
 
 // ROUTE_REQ is the table-miss path: switch asks controller how to forward.
@@ -659,6 +741,10 @@ void handlePortStatus(const ArduFlowPacket &message) {
 
   if (message.type == AF_PORT_STATUS_OFFLINE) {
     clearDiscoveredHostOnPort(message.source_id, message.port);
+    if (isChanged) {
+      logPortDown(message.source_id, message.port);
+      logSwitchDownIfNeeded(message.source_id);
+    }
   }
 
   if (stpApplied && isChanged) {
@@ -677,7 +763,7 @@ void handlePortStatus(const ArduFlowPacket &message) {
     HardwareSerial *port = controllerPortForSwitch(message.source_id);
     if (port != nullptr) {
       writeArduFlowPacket(*port, deleteRules);
-      logArduFlowPacket(F("Controller sent FLOW_DELETE:"), deleteRules);
+      logArduFlowPacket(F("SENT"), deleteRules);
     }
   }
 }
@@ -697,7 +783,7 @@ void sendPortStatusQuery(uint8_t switchId, uint8_t portNumber) {
   };
 
   writeArduFlowPacket(*port, query);
-  logArduFlowPacket(F("Controller sent PORT_STATUS_QUERY:"), query);
+  logArduFlowPacket(F("SENT"), query);
 }
 
 bool allDiscoveryReportsReceived() {
@@ -787,20 +873,21 @@ void pollPendingFlowAcks() {
       sendArduFlowToSwitch(pendingFlows[i].switch_id, retry);
       pendingFlows[i].sent_ms = now;
       pendingFlows[i].retried = true;
-      logArduFlowPacket(F("Controller retried FLOW_MOD:"), retry);
+      Serial.println(F("Controller: retrying unacknowledged FLOW_MOD"));
+      logArduFlowPacket(F("SENT"), retry);
     } else {
       pendingFlows[i].active = false;
-      logArduFlowPacket(F("Controller dropped unacknowledged FLOW_MOD:"), retry);
+      Serial.println(F("Controller: dropped unacknowledged FLOW_MOD"));
+      logArduFlowPacket(F("SENT"), retry);
     }
   }
 }
 
 // Dispatches one complete control packet by ArduFlow type.
 void handleArduFlowPacket(const ArduFlowPacket &message, const char *inputName) {
-  Serial.print(F("Controller received on "));
-  Serial.print(inputName);
-  Serial.print(F(":"));
-  logArduFlowPacket(F(""), message);
+  Serial.print(F("Controller input: "));
+  Serial.println(inputName);
+  logArduFlowPacket(F("RECV"), message);
 
   if (message.type == AF_ROUTE_REQ) {
     handleRouteRequest(message);
