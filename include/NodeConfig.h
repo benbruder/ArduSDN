@@ -8,7 +8,9 @@
 const unsigned long DEBUG_BAUD = 115200;
 const unsigned long CONTROL_BAUD = 115200;
 const unsigned long SWITCH_PORT_BAUD = 9600;
-const uint32_t PORT_STATUS_PING_TIMEOUT_US = 100000;
+const unsigned int PORT_TRIGGER_LEAD_US = 10000;
+const unsigned long POST_ID_DISCOVERY_DELAY_MS = 500;
+const uint32_t PORT_STATUS_PING_TIMEOUT_US = 250000;
 
 // Stable IDs from AGENTS.md.
 const uint8_t NANO_1_ID = 10;

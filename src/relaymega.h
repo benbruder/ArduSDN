@@ -101,9 +101,29 @@ HardwareSerial *portForDestination(uint8_t destinationId, const char **name) {
   return nullptr;
 }
 
+HardwareSerial *portForSwitchIdAssignment(const ArduFlowPacket &message, const char **name) {
+  if (message.type != AF_SET_SWITCH_ID || message.dest_id != AF_UNASSIGNED_ID) {
+    return nullptr;
+  }
+
+  if (message.port == NANO_1_ID) {
+    *name = "Nano 1";
+    return &Serial2;
+  }
+  if (message.port == NANO_4_ID) {
+    *name = "Nano 4";
+    return &Serial3;
+  }
+
+  return nullptr;
+}
+
 void forwardPacket(const ArduFlowPacket &message, const char *inputName) {
   const char *outputName = nullptr;
-  HardwareSerial *output = portForDestination(message.dest_id, &outputName);
+  HardwareSerial *output = portForSwitchIdAssignment(message, &outputName);
+  if (output == nullptr) {
+    output = portForDestination(message.dest_id, &outputName);
+  }
   if (output == nullptr) {
     Serial.print(F("RELAY DROP; Unknown destination: "));
     printNodeName(message.dest_id);

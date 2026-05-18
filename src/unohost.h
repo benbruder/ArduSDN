@@ -169,7 +169,7 @@ void updateButton(ButtonState &button, uint8_t pin) {
 // D2 is the host-side trigger line wired to the selected Nano port interrupt input.
 void writeDataPacket(const DataPacket &packet) {
   digitalWrite(HOST_TX_ENABLE_PIN, HIGH);
-  delayMicroseconds(50);
+  delayMicroseconds(PORT_TRIGGER_LEAD_US);
   Serial.write(reinterpret_cast<const uint8_t *>(&packet), sizeof(packet));
   Serial.flush();
   digitalWrite(HOST_TX_ENABLE_PIN, LOW);

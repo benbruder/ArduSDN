@@ -24,6 +24,12 @@ Each Nano uses NeoSWSerial on one of 3 virtual ports (where "Port 0" is its hard
  - Port 3: RX on D8, TX on D9, Trigger on D12, Interrupt on A2
 The "Trigger"s are outputs and the "Interrupt"s are inputs. When sending a packet to the Nano, the sender activates its trigger line (which is wired directly to the receiver's trigger), waits 50 microseconds, then sends the data, turning off the trigger line afterwards.
 Regarding how the Ports are connected, the lower-numbered port is associated with a higher priority device, where a host Uno would have the highest priority, followed by the connected Nano with the lowest index (the index of "Nano 2" is 2, etc.).
+Network Layout (direct connections):
+ - Host 1 connected to Nano 1, and
+ - Nano 1 connected to Nano 2 and Nano 3, and
+ - Nano 2 connected to Nano 3 and Nano 4, and
+ - Nano 3 connected to Nano 4, and
+ - Nano 4 connected to Host 2
 
 Controller Connections:
 - Mega 2 Serial0: USB serial monitor/debugging.
