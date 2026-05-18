@@ -21,6 +21,13 @@ RelayReader readers[] = {
   {&Serial3, "Nano 4", {0}, 0},
 };
 
+const unsigned long SWITCH_ID_ASSIGNMENT_RETRY_MS = 1000;
+// Mega 1 owns only local ID assignment for N1/N4 and retries until each ACK arrives.
+bool nano1IdAcked = false;
+bool nano4IdAcked = false;
+unsigned long lastNano1IdSendMs = 0;
+unsigned long lastNano4IdSendMs = 0;
+
 void printNodeName(uint8_t nodeId) {
   if (nodeId == AF_CONTROLLER_ID) {
     Serial.print(F("M2"));
@@ -121,6 +128,32 @@ void sendSwitchIdAssignment(HardwareSerial &port, const char *outputName, uint8_
   logRelayForward("Mega 1 local", outputName, message);
 }
 
+void recordLocalSwitchIdAck(const ArduFlowPacket &message) {
+  if (message.type != AF_ACK || message.dest_id != AF_CONTROLLER_ID || message.port != message.source_id) {
+    return;
+  }
+
+  if (message.source_id == NANO_1_ID) {
+    nano1IdAcked = true;
+  } else if (message.source_id == NANO_4_ID) {
+    nano4IdAcked = true;
+  }
+}
+
+void pollLocalSwitchIdAssignments() {
+  unsigned long now = millis();
+
+  if (!nano1IdAcked && (lastNano1IdSendMs == 0 || now - lastNano1IdSendMs >= SWITCH_ID_ASSIGNMENT_RETRY_MS)) {
+    sendSwitchIdAssignment(Serial2, "Nano 1", NANO_1_ID);
+    lastNano1IdSendMs = now;
+  }
+
+  if (!nano4IdAcked && (lastNano4IdSendMs == 0 || now - lastNano4IdSendMs >= SWITCH_ID_ASSIGNMENT_RETRY_MS)) {
+    sendSwitchIdAssignment(Serial3, "Nano 4", NANO_4_ID);
+    lastNano4IdSendMs = now;
+  }
+}
+
 void pollReader(RelayReader &reader) {
   while (reader.port->available() > 0) {
     reader.bytes[reader.length] = static_cast<uint8_t>(reader.port->read());
@@ -130,6 +163,7 @@ void pollReader(RelayReader &reader) {
       ArduFlowPacket message;
       memcpy(&message, reader.bytes, sizeof(message));
       reader.length = 0;
+      recordLocalSwitchIdAck(message);
       forwardPacket(message, reader.name);
     }
   }
@@ -143,11 +177,10 @@ void roleSetup() {
   Serial3.begin(CONTROL_BAUD);
 
   Serial.println(F("Mega 1 ArduFlow relay ready"));
-  sendSwitchIdAssignment(Serial2, "Nano 1", NANO_1_ID);
-  sendSwitchIdAssignment(Serial3, "Nano 4", NANO_4_ID);
 }
 
 void roleLoop() {
+  pollLocalSwitchIdAssignments();
   for (uint8_t i = 0; i < sizeof(readers) / sizeof(readers[0]); ++i) {
     pollReader(readers[i]);
   }

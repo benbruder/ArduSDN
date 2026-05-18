@@ -243,3 +243,19 @@ The default display is "----". The display will change in one of these scenarios
 
  #### APPROVED CODEX SUGGESTIONS:
 
+Nano interrupt handling:
+- Nano switches must use EnableInterrupt on A0-A2 trigger inputs.
+- A0-A2 are on PORTC / PCINT1.
+- NeoSWSerial RX pins use D4, D6, and D8, which are on PORTD / PCINT2 and PORTB / PCINT0.
+- To avoid PCINT vector conflicts, the nano_switch PlatformIO environment must define:
+  - NEOSWSERIAL_EXTERNAL_PCINT
+- In nanoswitch.h, define these before including EnableInterrupt:
+  - EI_NOTEXTERNAL
+  - EI_NOTPORTB
+  - EI_NOTPORTD
+- nanoswitch.h must provide manual NeoSWSerial handlers for:
+  - PCINT0_vect -> NeoSWSerial::rxISR(PINB)
+  - PCINT2_vect -> NeoSWSerial::rxISR(PIND)
+- EnableInterrupt owns PCINT1 for A0-A2 trigger detection.
+- The A0-A2 interrupt pins must trigger the switch to listen on the corresponding NeoSWSerial port; the switch should not blindly rotate through all ports.
+

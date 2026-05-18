@@ -2,10 +2,28 @@
 #define NANOSWITCH_H
 
 #include <Arduino.h>
+#include <avr/interrupt.h>
+// EnableInterrupt owns only A0-A2 on PORTC/PCINT1. NeoSWSerial owns D8/PORTB and D4/D6/PORTD.
+#define EI_NOTEXTERNAL
+#define EI_NOTPORTB
+#define EI_NOTPORTD
+#include <EnableInterrupt.h>
 #include <NeoSWSerial.h>
 #include <string.h>
 #include "NodeConfig.h"
 #include "SdnProtocol.h"
+
+// NeoSWSerial is built with NEOSWSERIAL_EXTERNAL_PCINT so it does not claim PCINT1.
+// These handlers preserve NeoSWSerial receive interrupts on the actual RX ports.
+#if defined(NEOSWSERIAL_EXTERNAL_PCINT)
+ISR(PCINT0_vect) {
+  NeoSWSerial::rxISR(PINB);
+}
+
+ISR(PCINT2_vect) {
+  NeoSWSerial::rxISR(PIND);
+}
+#endif
 
 namespace {
 uint8_t switchId = AF_UNASSIGNED_ID;
@@ -15,6 +33,7 @@ const uint8_t STATUS_LED_PIN = A5;
 const unsigned long NORMAL_PACKET_BLINK_INTERVAL_MS = 250;
 const unsigned long SIGNAL_PACKET_BLINK_INTERVAL_MS = 500;
 const uint8_t STATUS_LED_TOGGLE_COUNT = 4;
+const unsigned long TRIGGER_READ_WINDOW_MS = 25;
 
 struct SwitchPort {
   NeoSWSerial *serial;
@@ -58,6 +77,23 @@ bool statusLedState = false;
 uint8_t statusLedTogglesRemaining = 0;
 unsigned long statusLedIntervalMs = 0;
 unsigned long lastStatusLedToggleMs = 0;
+// Trigger pins choose which NeoSWSerial port should listen next.
+// EnableInterrupt sets these flags from A0-A2 without claiming NeoSWSerial's RX vectors.
+volatile bool triggerPending[SWITCH_PORT_COUNT] = {false};
+uint8_t activeListenPort = AF_NO_PORT;
+unsigned long activeListenStartMs = 0;
+
+void markPort1Triggered() {
+  triggerPending[0] = true;
+}
+
+void markPort2Triggered() {
+  triggerPending[1] = true;
+}
+
+void markPort3Triggered() {
+  triggerPending[2] = true;
+}
 
 SwitchPort *portByNumber(uint8_t portNumber) {
   if (portNumber < 1 || portNumber > SWITCH_PORT_COUNT) {
@@ -201,14 +237,15 @@ bool isFlowAddType(uint8_t type) {
          type <= AF_FLOW_ADD_SRC_DST_OVERWRITE;
 }
 
-void installFlowRule(const ArduFlowPacket &message) {
+// Installs a controller rule and returns whether the switch can now forward the embedded packet.
+bool installFlowRule(const ArduFlowPacket &message) {
   FlowRule *target = nullptr;
 
   for (uint8_t i = 0; i < FLOW_TABLE_SIZE; ++i) {
     if (sameMatch(flowTable[i], message.type, message.packet)) {
       if (!isOverwriteFlowType(message.type)) {
         sendAck(message.port);
-        return;
+        return true;
       }
       target = &flowTable[i];
       break;
@@ -225,7 +262,7 @@ void installFlowRule(const ArduFlowPacket &message) {
   }
 
   if (target == nullptr) {
-    return;
+    return false;
   }
 
   target->type = message.type;
@@ -234,6 +271,7 @@ void installFlowRule(const ArduFlowPacket &message) {
   target->output_port = message.port;
   target->used = true;
   sendAck(message.port);
+  return true;
 }
 
 void deleteRulesForMessage(const ArduFlowPacket &message) {
@@ -336,12 +374,13 @@ void handleDataPacket(uint8_t ingressPort, const DataPacket &packet) {
   forwardPacket(ingressPort, packet);
 }
 
-void pollDataPort(uint8_t portNumber) {
+bool pollDataPort(uint8_t portNumber) {
   SwitchPort *port = portByNumber(portNumber);
   if (port == nullptr) {
-    return;
+    return false;
   }
 
+  bool packetHandled = false;
   port->serial->listen();
   while (port->serial->available() > 0) {
     port->bytes[port->length] = static_cast<uint8_t>(port->serial->read());
@@ -352,7 +391,34 @@ void pollDataPort(uint8_t portNumber) {
       memcpy(&packet, port->bytes, sizeof(packet));
       port->length = 0;
       handleDataPacket(portNumber, packet);
+      packetHandled = true;
     }
+  }
+
+  return packetHandled;
+}
+
+void pollTriggeredDataPorts() {
+  if (activeListenPort == AF_NO_PORT) {
+    for (uint8_t i = 0; i < SWITCH_PORT_COUNT; ++i) {
+      if (triggerPending[i]) {
+        noInterrupts();
+        triggerPending[i] = false;
+        interrupts();
+        activeListenPort = i + 1;
+        activeListenStartMs = millis();
+        break;
+      }
+    }
+  }
+
+  if (activeListenPort == AF_NO_PORT) {
+    return;
+  }
+
+  bool packetHandled = pollDataPort(activeListenPort);
+  if (packetHandled || millis() - activeListenStartMs >= TRIGGER_READ_WINDOW_MS) {
+    activeListenPort = AF_NO_PORT;
   }
 }
 
@@ -385,7 +451,9 @@ void handleControllerMessage(const ArduFlowPacket &message) {
   startStatusBlink(SIGNAL_PACKET_BLINK_INTERVAL_MS);
 
   if (isFlowAddType(message.type)) {
-    installFlowRule(message);
+    if (installFlowRule(message)) {
+      forwardPacket(AF_NO_PORT, message.packet);
+    }
     return;
   }
 
@@ -445,13 +513,15 @@ void roleSetup() {
     pinMode(switchPorts[i].trigger_in, INPUT);
     digitalWrite(switchPorts[i].trigger_out, LOW);
   }
+
+  enableInterrupt(switchPorts[0].trigger_in, markPort1Triggered, RISING);
+  enableInterrupt(switchPorts[1].trigger_in, markPort2Triggered, RISING);
+  enableInterrupt(switchPorts[2].trigger_in, markPort3Triggered, RISING);
 }
 
 void roleLoop() {
   pollController();
-  for (uint8_t port = 1; port <= SWITCH_PORT_COUNT; ++port) {
-    pollDataPort(port);
-  }
+  pollTriggeredDataPorts();
   pollPendingQuery();
   pollStatusLed();
 }
