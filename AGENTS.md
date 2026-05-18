@@ -24,6 +24,12 @@ Each Nano uses NeoSWSerial on one of 3 virtual ports (where "Port 0" is its hard
  - Port 3: RX on D8, TX on D9, Trigger on D12, Interrupt on A2
 The "Trigger"s are outputs and the "Interrupt"s are inputs. When sending a packet to the Nano, the sender activates its trigger line (which is wired directly to the receiver's trigger), waits 50 microseconds, then sends the data, turning off the trigger line afterwards.
 Regarding how the Ports are connected, the lower-numbered port is associated with a higher priority device, where a host Uno would have the highest priority, followed by the connected Nano with the lowest index (the index of "Nano 2" is 2, etc.).
+Network Layout (direct connections):
+ - Host 1 connected to Nano 1, and
+ - Nano 1 connected to Nano 2 and Nano 3, and
+ - Nano 2 connected to Nano 3 and Nano 4, and
+ - Nano 3 connected to Nano 4, and
+ - Nano 4 connected to Host 2
 
 Controller Connections:
 - Mega 2 Serial0: USB serial monitor/debugging.
@@ -146,7 +152,6 @@ struct DataPacket {  // Used to send actual data
     uint32_t data;
 }
 
- - For a PING: app_id=0 for an outgoing ping (if setting=1 then 'data' is the amount of microseconds the sender should wait for a ping reply) and app_id=1 for a ping reply ('setting' and 'data' are 0)
 
 struct ArduFlowPacket { // used for communication between controller and switches
     uint8_t source_id;      
@@ -155,6 +160,8 @@ struct ArduFlowPacket { // used for communication between controller and switche
     uint8_t port;    // either 1, 2, or 3 depending on the port the packet in question came from
     DataPacket packet;
 }
+
+- DataPacket - For a PING: app_id=0 for an outgoing ping (if setting=1 then 'data' is the amount of microseconds the sender should wait for a ping reply) and app_id=1 for a ping reply ('setting' and 'data' are 0)
 
 FLOW_MOD elaboration:
  - 20: Add, match 'source_id' of attached packet (do not overwrite if already exists)

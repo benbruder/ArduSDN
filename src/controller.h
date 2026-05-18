@@ -23,7 +23,10 @@ ArduFlowReader readers[] = {
 };
 
 const unsigned long DISCOVERY_QUERY_INTERVAL_MS = 25;
+const unsigned long DISCOVERY_QUERY_RETRY_MS = (PORT_STATUS_PING_TIMEOUT_US / 1000UL) + 100;
 const unsigned long SWITCH_ID_ASSIGNMENT_SUMMARY_MS = 1000;
+const unsigned long SWITCH_ID_ASSIGNMENT_RETRY_MS = 1000;
+const uint8_t MAX_DISCOVERY_QUERY_RETRIES = 3;
 const uint8_t MAX_DISCOVERED_PORTS = sizeof(SWITCH_IDS) * SWITCH_PORT_COUNT;
 const uint8_t MAX_DISCOVERED_HOSTS = sizeof(HOST_IDS);
 const uint8_t MAX_FORWARDING_DECISIONS = sizeof(SWITCH_IDS) * sizeof(HOST_IDS);
@@ -77,7 +80,12 @@ PendingFlow pendingFlows[MAX_PENDING_FLOWS];
 uint8_t discoverySwitchIndex = 0;
 uint8_t discoveryPort = 1;
 unsigned long lastDiscoveryQueryMs = 0;
+unsigned long discoveryQuerySentMs = 0;
+bool discoveryQueryInFlight = false;
+uint8_t discoveryQueryRetries = 0;
 unsigned long lastAssignmentSummaryMs = 0;
+unsigned long lastAssignmentSendMs = 0;
+unsigned long allSwitchIdsAckedMs = 0;
 // Discovery must not begin until every switch has confirmed its runtime ID.
 bool switchIdAcked[sizeof(SWITCH_IDS)] = {false};
 bool switchIdsAssigned = false;
@@ -114,6 +122,14 @@ void sendSwitchIdAssignment(uint8_t switchId) {
 
   sendArduFlowToSwitch(switchId, message);
   logArduFlowPacket(F("SENT"), message);
+}
+
+void sendMissingSwitchIdAssignments() {
+  for (uint8_t i = 0; i < sizeof(SWITCH_IDS); ++i) {
+    if (!switchIdAcked[i]) {
+      sendSwitchIdAssignment(SWITCH_IDS[i]);
+    }
+  }
 }
 
 uint8_t switchIdIndex(uint8_t switchId) {
@@ -306,7 +322,8 @@ void recordSwitchIdAck(uint8_t switchId) {
 
   if (allSwitchIdsAcked()) {
     switchIdsAssigned = true;
-    Serial.println(F("Controller: all required switch IDs acknowledged; starting discovery"));
+    allSwitchIdsAckedMs = millis();
+    Serial.println(F("Controller: all required switch IDs acknowledged; waiting before discovery"));
   }
 }
 
@@ -868,13 +885,51 @@ bool allDiscoveryReportsReceived() {
   return true;
 }
 
+void advanceDiscoveryCursor() {
+  discoveryQueryInFlight = false;
+  discoveryQueryRetries = 0;
+  ++discoveryPort;
+  if (discoveryPort > SWITCH_PORT_COUNT) {
+    discoveryPort = 1;
+    ++discoverySwitchIndex;
+  }
+}
+
+void markDiscoveryPortOffline(uint8_t switchId, uint8_t portNumber) {
+  DiscoveredPort *portRecord = allocateDiscoveredPort(switchId, portNumber);
+  if (portRecord != nullptr) {
+    portRecord->online = false;
+    portRecord->peer_id = AF_UNKNOWN_ID;
+    portRecord->blocked = false;
+    portRecord->block_state_sent = false;
+    portRecord->last_sent_blocked = false;
+  }
+
+  Serial.print(F("Controller: no PORT_STATUS response from "));
+  printNodeName(switchId);
+  Serial.print(F(" port "));
+  Serial.print(portNumber);
+  Serial.println(F("; marking offline and continuing discovery"));
+  logPortDown(switchId, portNumber);
+  logSwitchDownIfNeeded(switchId);
+}
+
 void pollDiscovery() {
   if (!switchIdsAssigned) {
     unsigned long now = millis();
+    if (lastAssignmentSendMs == 0 || now - lastAssignmentSendMs >= SWITCH_ID_ASSIGNMENT_RETRY_MS) {
+      sendMissingSwitchIdAssignments();
+      lastAssignmentSendMs = now;
+    }
+
     if (lastAssignmentSummaryMs == 0 || now - lastAssignmentSummaryMs >= SWITCH_ID_ASSIGNMENT_SUMMARY_MS) {
       printSwitchIdAssignmentSummary();
       lastAssignmentSummaryMs = now;
     }
+    return;
+  }
+
+  if (millis() - allSwitchIdsAckedMs < POST_ID_DISCOVERY_DELAY_MS) {
     return;
   }
 
@@ -890,24 +945,39 @@ void pollDiscovery() {
   }
 
   unsigned long now = millis();
-  if (lastDiscoveryQueryMs != 0 && now - lastDiscoveryQueryMs < DISCOVERY_QUERY_INTERVAL_MS) {
-    return;
-  }
-
   if (discoverySwitchIndex >= sizeof(SWITCH_IDS)) {
     discoveryQueriesSent = true;
     Serial.println(F("Controller: startup discovery queries sent; waiting for reports"));
     return;
   }
 
-  sendPortStatusQuery(SWITCH_IDS[discoverySwitchIndex], discoveryPort);
-  lastDiscoveryQueryMs = now;
+  uint8_t switchId = SWITCH_IDS[discoverySwitchIndex];
+  if (discoveryQueryInFlight) {
+    if (findDiscoveredPort(switchId, discoveryPort) != nullptr) {
+      advanceDiscoveryCursor();
+      return;
+    }
 
-  ++discoveryPort;
-  if (discoveryPort > SWITCH_PORT_COUNT) {
-    discoveryPort = 1;
-    ++discoverySwitchIndex;
+    if (now - discoveryQuerySentMs < DISCOVERY_QUERY_RETRY_MS) {
+      return;
+    }
+
+    if (discoveryQueryRetries >= MAX_DISCOVERY_QUERY_RETRIES) {
+      markDiscoveryPortOffline(switchId, discoveryPort);
+      advanceDiscoveryCursor();
+      return;
+    }
+
+    ++discoveryQueryRetries;
+    Serial.println(F("Controller: retrying startup PORT_STATUS_QUERY"));
+  } else if (lastDiscoveryQueryMs != 0 && now - lastDiscoveryQueryMs < DISCOVERY_QUERY_INTERVAL_MS) {
+    return;
   }
+
+  sendPortStatusQuery(switchId, discoveryPort);
+  lastDiscoveryQueryMs = now;
+  discoveryQuerySentMs = now;
+  discoveryQueryInFlight = true;
 }
 
 void pollHealthCheck() {
@@ -1011,8 +1081,8 @@ void roleSetup() {
   Serial.println(F("Mega 2 ArduFlow controller ready"));
   Serial.println(F("Controller: waiting for switch ID ACKs before discovery"));
   printSwitchIdAssignmentSummary();
-  sendSwitchIdAssignment(NANO_2_ID);
-  sendSwitchIdAssignment(NANO_3_ID);
+  sendMissingSwitchIdAssignments();
+  lastAssignmentSendMs = millis();
 }
 
 void roleLoop() {

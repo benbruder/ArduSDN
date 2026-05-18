@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
 // EnableInterrupt owns only A0-A2 on PORTC/PCINT1. NeoSWSerial owns D8/PORTB and D4/D6/PORTD.
 #define EI_NOTEXTERNAL
 #define EI_NOTPORTB
@@ -25,8 +26,12 @@ ISR(PCINT2_vect) {
 }
 #endif
 
+uint8_t retainedSwitchId __attribute__((section(".noinit")));
+uint8_t retainedSwitchMagic __attribute__((section(".noinit")));
+
 namespace {
 uint8_t switchId = AF_UNASSIGNED_ID;
+const uint8_t RETAINED_SWITCH_MAGIC = 0xA5;
 const uint8_t FLOW_TABLE_SIZE = 8;
 const uint8_t STATUS_LED_PIN = A5;
 const unsigned long NORMAL_PACKET_BLINK_INTERVAL_MS = 250;
@@ -37,9 +42,17 @@ const uint8_t DIAGNOSTIC_LED_PIN = LED_BUILTIN;
 const unsigned long DIAGNOSTIC_HEARTBEAT_INTERVAL_MS = 2000;
 const unsigned long DIAGNOSTIC_BURST_INTERVAL_MS = 100;
 const unsigned long DIAGNOSTIC_QUERY_INTERVAL_MS = 125;
-const uint8_t ID_ASSIGNED_DIAGNOSTIC_TOGGLES = 6;
-const uint8_t ROUTE_REQ_DIAGNOSTIC_TOGGLES = 4;
-const uint8_t TABLE_FULL_DIAGNOSTIC_TOGGLES = 10;
+const uint8_t DIAGNOSTIC_QUEUE_SIZE = 8;
+const uint8_t QUERY_RECEIVED_DIAGNOSTIC_TOGGLES = 2;
+const uint8_t PING_SENT_DIAGNOSTIC_TOGGLES = 4;
+const uint8_t DATA_RECEIVED_DIAGNOSTIC_TOGGLES = 6;
+const uint8_t PING_REPLY_DIAGNOSTIC_TOGGLES = 8;
+const uint8_t QUERY_TIMEOUT_DIAGNOSTIC_TOGGLES = 10;
+const uint8_t ROUTE_REQ_DIAGNOSTIC_TOGGLES = 12;
+const uint8_t ID_RESET_DIAGNOSTIC_TOGGLES = 14;
+const uint8_t TABLE_FULL_DIAGNOSTIC_TOGGLES = 16;
+const unsigned long SWITCH_ID_RESET_DELAY_MS = 50;
+const bool FORCE_PORT_STATUS_TEST_LISTEN = true;
 
 struct SwitchPort {
   NeoSWSerial *serial;
@@ -78,6 +91,8 @@ FlowRule flowTable[FLOW_TABLE_SIZE];
 uint8_t controllerBytes[sizeof(ArduFlowPacket)];
 uint8_t controllerLength = 0;
 PendingPortQuery pendingQuery = {false, AF_NO_PORT, 0};
+bool switchIdResetPending = false;
+unsigned long switchIdResetAtMs = 0;
 bool statusLedActive = false;
 bool statusLedState = false;
 uint8_t statusLedTogglesRemaining = 0;
@@ -88,6 +103,8 @@ bool diagnosticBurstActive = false;
 uint8_t diagnosticTogglesRemaining = 0;
 unsigned long diagnosticIntervalMs = 0;
 unsigned long lastDiagnosticToggleMs = 0;
+uint8_t diagnosticQueue[DIAGNOSTIC_QUEUE_SIZE];
+uint8_t diagnosticQueueLength = 0;
 // Trigger pins choose which NeoSWSerial port should listen next.
 // EnableInterrupt sets these flags from A0-A2 without claiming NeoSWSerial's RX vectors.
 volatile bool triggerPending[SWITCH_PORT_COUNT] = {false};
@@ -104,6 +121,38 @@ void markPort2Triggered() {
 
 void markPort3Triggered() {
   triggerPending[2] = true;
+}
+
+bool isValidSwitchId(uint8_t candidateId) {
+  for (uint8_t i = 0; i < sizeof(SWITCH_IDS); ++i) {
+    if (SWITCH_IDS[i] == candidateId) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+uint8_t forcedTestListenPort() {
+  if (!FORCE_PORT_STATUS_TEST_LISTEN) {
+    return AF_NO_PORT;
+  }
+  if (switchId == NANO_1_ID) {
+    return 2;
+  }
+  if (switchId == NANO_2_ID) {
+    return 1;
+  }
+
+  return AF_NO_PORT;
+}
+
+void loadRetainedSwitchId() {
+  if (retainedSwitchMagic == RETAINED_SWITCH_MAGIC && isValidSwitchId(retainedSwitchId)) {
+    switchId = retainedSwitchId;
+  } else {
+    switchId = AF_UNASSIGNED_ID;
+  }
 }
 
 SwitchPort *portByNumber(uint8_t portNumber) {
@@ -126,7 +175,7 @@ bool isHostId(uint8_t deviceId) {
 
 void writeDataPacket(SwitchPort &port, const DataPacket &packet) {
   digitalWrite(port.trigger_out, HIGH);
-  delayMicroseconds(50);
+  delayMicroseconds(PORT_TRIGGER_LEAD_US);
   port.serial->write(reinterpret_cast<const uint8_t *>(&packet), sizeof(packet));
   port.serial->flush();
   digitalWrite(port.trigger_out, LOW);
@@ -170,14 +219,41 @@ void pollStatusLed() {
   }
 }
 
-// D13 is a close-range diagnostic LED: heartbeat when assigned, bursts for notable events.
-void startDiagnosticBurst(uint8_t toggles, unsigned long intervalMs) {
+void beginDiagnosticBurst(uint8_t toggles, unsigned long intervalMs) {
   diagnosticBurstActive = true;
   diagnosticLedState = true;
   diagnosticTogglesRemaining = toggles;
   diagnosticIntervalMs = intervalMs;
   lastDiagnosticToggleMs = millis();
   digitalWrite(DIAGNOSTIC_LED_PIN, HIGH);
+}
+
+// D13 is a close-range diagnostic LED: heartbeat when assigned, queued bursts for events.
+void startDiagnosticBurst(uint8_t toggles, unsigned long intervalMs) {
+  if (!diagnosticBurstActive) {
+    beginDiagnosticBurst(toggles, intervalMs);
+    return;
+  }
+
+  if (diagnosticQueueLength >= DIAGNOSTIC_QUEUE_SIZE) {
+    return;
+  }
+
+  diagnosticQueue[diagnosticQueueLength] = toggles;
+  ++diagnosticQueueLength;
+}
+
+void startNextQueuedDiagnosticBurst() {
+  if (diagnosticQueueLength == 0) {
+    return;
+  }
+
+  uint8_t toggles = diagnosticQueue[0];
+  for (uint8_t i = 1; i < diagnosticQueueLength; ++i) {
+    diagnosticQueue[i - 1] = diagnosticQueue[i];
+  }
+  --diagnosticQueueLength;
+  beginDiagnosticBurst(toggles, DIAGNOSTIC_BURST_INTERVAL_MS);
 }
 
 void pollDiagnosticLed() {
@@ -201,6 +277,7 @@ void pollDiagnosticLed() {
       diagnosticLedState = false;
       digitalWrite(DIAGNOSTIC_LED_PIN, LOW);
       lastDiagnosticToggleMs = now;
+      startNextQueuedDiagnosticBurst();
     }
     return;
   }
@@ -237,6 +314,26 @@ void sendAck(uint8_t portNumber) {
   };
 
   writeArduFlowPacket(ack);
+}
+
+void scheduleWatchdogReset() {
+  switchIdResetPending = true;
+  switchIdResetAtMs = millis() + SWITCH_ID_RESET_DELAY_MS;
+}
+
+void retainSwitchIdForWatchdogReset(uint8_t assignedId) {
+  retainedSwitchId = assignedId;
+  retainedSwitchMagic = RETAINED_SWITCH_MAGIC;
+}
+
+void pollScheduledReset() {
+  if (!switchIdResetPending || static_cast<long>(millis() - switchIdResetAtMs) < 0) {
+    return;
+  }
+
+  wdt_enable(WDTO_15MS);
+  while (true) {
+  }
 }
 
 bool matchesRule(const FlowRule &rule, const DataPacket &packet) {
@@ -424,6 +521,8 @@ void sendPortStatus(uint8_t type, uint8_t portNumber, const DataPacket &packet) 
 }
 
 void handleDataPacket(uint8_t ingressPort, const DataPacket &packet) {
+  startDiagnosticBurst(DATA_RECEIVED_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
+
   if (isHostId(packet.source_id)) {
     startStatusBlink(NORMAL_PACKET_BLINK_INTERVAL_MS);
   }
@@ -437,6 +536,7 @@ void handleDataPacket(uint8_t ingressPort, const DataPacket &packet) {
       pendingQuery.port == ingressPort &&
       packet.app_id == DATA_APP_PING_REPLY) {
     pendingQuery.active = false;
+    startDiagnosticBurst(PING_REPLY_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
     sendPortStatus(AF_PORT_STATUS_ONLINE, ingressPort, packet);
     return;
   }
@@ -469,6 +569,12 @@ bool pollDataPort(uint8_t portNumber) {
 }
 
 void pollTriggeredDataPorts() {
+  uint8_t forcedPort = forcedTestListenPort();
+  if (forcedPort != AF_NO_PORT) {
+    pollDataPort(forcedPort);
+    return;
+  }
+
   if (activeListenPort == AF_NO_PORT) {
     for (uint8_t i = 0; i < SWITCH_PORT_COUNT; ++i) {
       if (triggerPending[i]) {
@@ -493,6 +599,7 @@ void pollTriggeredDataPorts() {
 }
 
 void startPortStatusQuery(const ArduFlowPacket &message) {
+  startDiagnosticBurst(QUERY_RECEIVED_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
   SwitchPort *port = portByNumber(message.port);
   if (port == nullptr) {
     sendPortStatus(AF_PORT_STATUS_OFFLINE, message.port, {0, 0, 0, 0, 0});
@@ -503,15 +610,18 @@ void startPortStatusQuery(const ArduFlowPacket &message) {
   pendingQuery.port = message.port;
   pendingQuery.deadline_ms = millis() + (message.packet.data / 1000UL);
   writeDataPacket(*port, message.packet);
+  startDiagnosticBurst(PING_SENT_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
 }
 
 void handleControllerMessage(const ArduFlowPacket &message) {
   if (message.type == AF_SET_SWITCH_ID &&
       (message.dest_id == AF_UNASSIGNED_ID || message.dest_id == switchId)) {
     switchId = message.port;
+    retainSwitchIdForWatchdogReset(switchId);
     startStatusBlink(SIGNAL_PACKET_BLINK_INTERVAL_MS);
-    startDiagnosticBurst(ID_ASSIGNED_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
+    startDiagnosticBurst(ID_RESET_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
     sendAck(switchId);
+    scheduleWatchdogReset();
     return;
   }
 
@@ -568,12 +678,15 @@ void pollPendingQuery() {
   if (static_cast<long>(millis() - pendingQuery.deadline_ms) >= 0) {
     uint8_t port = pendingQuery.port;
     pendingQuery.active = false;
+    startDiagnosticBurst(QUERY_TIMEOUT_DIAGNOSTIC_TOGGLES, DIAGNOSTIC_BURST_INTERVAL_MS);
     sendPortStatus(AF_PORT_STATUS_OFFLINE, port, {0, 0, 0, 0, 0});
   }
 }
 }
 
 void roleSetup() {
+  wdt_disable();
+  loadRetainedSwitchId();
   Serial.begin(CONTROL_BAUD);
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(DIAGNOSTIC_LED_PIN, OUTPUT);
@@ -598,6 +711,7 @@ void roleLoop() {
   pollPendingQuery();
   pollStatusLed();
   pollDiagnosticLed();
+  pollScheduledReset();
 }
 
 #endif
