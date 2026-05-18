@@ -193,3 +193,36 @@ pio run -e uno_host
 Make small, testable changes.
 Do not ever rewrite the entire project
 After editing code, explain exactly which files changed and how to test them.
+
+## Host IO
+
+Each host device is connected to its switch using its hardware TX/RX pins, using pin 2 as the outbound transmission pin (as elaborated on earlier). It does not need a trigger pin, as it is using hardware serial.
+
+It has a 5461AS 4-digit seven segment display (common cathode) connected to the following pins:
+- Digit 1-4 common cathodes: Pin D13-D10, respectively
+- Segment A: D8
+- Segment B: D6
+- Segment C: A5
+- Segment DP (Decimal Point): A4
+- Segment D: A3
+- Segment E: A2
+- Segment F: D7
+- Segment G: D9
+I will be using the SevSeg library to control this.
+
+There are two buttons (simply wired to gnd, will need to use INPUT_PULLUP and debounce logic):
+- Button 1: A0
+- Button 2: A1
+
+Finally, there are two (optional) LEDs:
+- LED 1 ("Compose Message"): D4
+- LED 2 ("Send/Receive Message"): D5
+
+The default display is "----". The display will change in one of these scenarios:
+1. When Button 1 is pressed (except if a received message is currently being displayed, as elaborated in 2.):
+ - The display will turn into a hexadeximal number starting at 0000. When Button 1 is pressed again, the display will increment (up to FFFF, and then loop back to 0000). After holding Button 1 for more than 1 second, the least significant digit will increases at a rate of 4 increments per second. If still holding for another 2 seconds, the next most significant digit (the second-to-rightmost digit) will increase at the aforementioned rate. If still holding for another 2 more seconds, the same will happen to the third digit. Finally, if they're still holding for another 2 more seconds the same will happen to the fourth digit.
+ - Once the user has selected a number, the user will be able to press Button 2 to send the number as data to the other Host (the packet is sent with app_id as 67 and setting as 21, with the number as 'data'). After sending, the display will show "SEnt" for 1 second, then go back to displaying "----". The state of any DPs are unaffected by any of this process.
+2. When a packet is received from the other Host whose app_id == 67 and setting == 21:
+ - The data will the be stored in a queue. If there is data in the first queue slot, the DP of Digit 1 will turn on. The same goes for the other 3 DPs for the second, third, and fourth matching packets. The queue can only hold 4 elements, and if a 5th matching packet is received when the queue is full, LED 2 will flash for 1 second, and that packet will then be discarded.
+ - When Button 2 is pressed when "----" is displayed and at least 1 message is in the queue (as marked by the DPs), the data will be popped off of the queue (with the DPs to "decrement" accordingly) and shown on the display while LED 1 blinks once per second. When either button is pressed when the received data is being displayed, the message will be cleared from the screen and the default "----" will be displayed once more. However, when Button 2 is pressed when there is a number displayed (i.e. while a message to send is being composed) from using Button 1 (as described in 1.), it will always trigger a send action, even if DPs are lit (i.e. when there are matching packets in the receive queue).
+ - Since the display can only show 2 bytes (4 hex digits), any data more than 2 bytes will be truncated so that only 16 least significant bits will (in hex format) be displayed.
